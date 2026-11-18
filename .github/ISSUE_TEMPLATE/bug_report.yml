@@ -1,0 +1,22 @@
+name: Bug 报告
+description: 报告连接、显示、菜单或兼容性问题
+body:
+  - type: textarea
+    id: environment
+    attributes:
+      label: 测试环境
+      description: 填写 macOS 版本、Mac 芯片、Android 版本、平板型号及代码版本；不要填写序列号或身份摘要。
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: 复现步骤
+      description: 说明 USB 连接情况、菜单设置、预期行为和实际行为。
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: 检查与日志
+      description: 可填写构建和测试结果。日志需删除用户名、SDK 路径、设备标识和屏幕内容；安全问题请参考 SECURITY.md。

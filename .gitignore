@@ -1,0 +1,31 @@
+/.build/
+/build/
+/dist/
+/release/
+.DS_Store
+*.log
+core
+core.*
+
+# Local SDK/editor settings and environment values.
+local.properties
+.idea/
+.vscode/
+.env
+.env.*
+!.env.example
+
+# Build outputs and local signing material must never be published.
+*.app/
+*.dSYM/
+*.apk
+*.aab
+*.class
+*.dex
+*.jks
+*.keystore
+*.p12
+*.pfx
+*.pem
+*.key
+*.mobileprovision
