@@ -12,6 +12,6 @@ xcrun swiftc -O macos/Localization.swift macos/USBReconnect.swift macos/tests/US
 xcrun swiftc -O macos/Localization.swift macos/DisplayLayout.swift macos/tests/DisplayLayoutTests.swift -o .build/display-layout-tests
 .build/display-layout-tests
 xcrun swiftc -O -target arm64-apple-macos15.0 -import-objc-header macos/VirtualDisplay.h \
-    macos/Sender.swift macos/AppController.swift macos/Localization.swift macos/StreamSettings.swift macos/DeviceProfiles.swift \
+    macos/Sender.swift macos/TouchInput.swift macos/AppController.swift macos/Localization.swift macos/StreamSettings.swift macos/DeviceProfiles.swift \
     macos/DisplayLayout.swift macos/USBReconnect.swift macos/tests/MenuSettingsTests.swift -o .build/menu-settings-tests
 .build/menu-settings-tests "$@"

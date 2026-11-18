@@ -26,7 +26,7 @@ done <<'ICON_SIZES'
 ICON_SIZES
 iconutil -c icns "$iconset" -o "$app/Contents/Resources/AppIcon.icns"
 xcrun swiftc -O -target arm64-apple-macos15.0 -import-objc-header macos/VirtualDisplay.h \
-    macos/main.swift macos/Localization.swift macos/Sender.swift macos/AppController.swift macos/StreamSettings.swift macos/DeviceProfiles.swift \
+    macos/main.swift macos/Localization.swift macos/Sender.swift macos/TouchInput.swift macos/AppController.swift macos/StreamSettings.swift macos/DeviceProfiles.swift \
     macos/DisplayLayout.swift macos/USBReconnect.swift -o "$app/Contents/MacOS/WireView"
 codesign --force --sign - "$app"
 echo "$app"

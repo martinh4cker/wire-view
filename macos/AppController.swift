@@ -6,6 +6,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var sender: Sender?
     private var busy = false
     private var testPattern = false
+    private var requestedTouchPermission = false
     private let preferences: UserDefaults
     private var config: StreamSettings
     private var profiles: DeviceProfiles
@@ -13,6 +14,8 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var deviceMonitor: USBDeviceMonitor?
     private let adb: USBReconnect.Run?
     private var sessionRequested = false
+    private var sessionDevice: USBDevice?
+    private var lostDevice = false
     private var status = tr("Not started")
     private var detail = ""
 
@@ -46,6 +49,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         headline.toolTip = detail.isEmpty ? config.summary : detail
         menu.addItem(headline)
         add(sender == nil ? tr("Start display") : tr("Stop display"), action: #selector(toggleSession), to: menu)
+        if sender == nil, selectedUSBDevice == nil { menu.items.last?.isEnabled = false }
         menu.addItem(.separator())
 
         let destinations = submenu(tr("Android devices"), in: menu)
@@ -102,6 +106,7 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         add(tr("Display arrangement…"), action: #selector(openDisplays), to: more, alwaysEnabled: true)
         add(tr("Screen recording permission…"), action: #selector(openPermissions), to: more, alwaysEnabled: true)
         add(tr("Test pattern"), action: #selector(startTest), checked: sender != nil && testPattern, to: more)
+        if selectedUSBDevice == nil { more.items.last?.isEnabled = false }
         add(tr("Quit"), action: #selector(quit), to: menu)
     }
 
@@ -124,9 +129,19 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(entry)
     }
 
+    private var selectedUSBDevice: USBDevice? {
+        devices.first { $0.identity == profiles.selectedID }
+    }
+
     // Called on the main thread; discovery never starts recording by itself.
     func devicesChanged(_ next: [USBDevice]) {
         devices = next
+        if sessionRequested, let target = sessionDevice,
+           !next.contains(where: { $0.identity == target.identity && $0.transport == target.transport }) {
+            lostDevice = true
+            sessionRequested = false
+            if !busy { changeSession(start: false, disconnected: true) }
+        }
         if profiles.selectedID == nil, next.count == 1, let first = next.first {
             selectDeviceID(first.identity)
         }
@@ -215,32 +230,39 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
         changeSession(start: true, testing: true)
     }
 
-    private func changeSession(start: Bool, testing: Bool = false) {
+    private func changeSession(start: Bool, testing: Bool = false, disconnected: Bool = false) {
         guard !busy else { return }
-        sessionRequested = start
+        let target = start ? selectedUSBDevice : nil
+        sessionRequested = target != nil
+        sessionDevice = target
+        lostDevice = disconnected
         testPattern = testing
-        if start, profiles.selected == nil {
-            report(tr("Select an Android device"), detail: tr("Choose an authorized USB device from the Android devices menu."))
+        if start, target == nil, sender == nil {
+            report(tr("Connect the selected USB tablet to start."))
             return
         }
         busy = true
-        report(start ? tr("Connecting…") : tr("Stopping…"))
+        report(target != nil ? tr("Connecting…") : tr("Stopping…"))
         Task { @MainActor in
             if let current = sender {
                 current.onStatus = nil; current.onMetrics = nil; current.onFailure = nil
                 sender = nil
                 await current.stop()
             }
-            if start {
+            if let target, !lostDevice {
                 do {
                     let destination = profiles.selected!
                     let next = try Sender(settings: config, targetDeviceID: destination.identity,
-                                          hostPort: destination.hostPort, preferences: preferences)
+                                          hostPort: destination.hostPort, preferences: preferences, usbTransport: target.transport)
                     sender = next
                     testPattern = testing
                     next.onStatus = { [weak self, weak next] message in
                         guard let self, let next, self.sender === next else { return }
-                        if message.hasPrefix(tr("Connected")) { self.report(testing ? tr("Testing") : tr("Connected"), detail: message) }
+                        if message.hasPrefix(tr("Connected")) {
+                            let needsTouchPermission = !testing && self.config.sourceUUID == nil && !CGPreflightPostEventAccess()
+                            self.report(testing ? tr("Testing") : tr("Connected"),
+                                        detail: needsTouchPermission ? tr("Allow WireView in Privacy & Security → Accessibility to use touch.") : message)
+                        }
                         else if message.hasPrefix(tr("Waiting for tablet")) { self.report(tr("Waiting for tablet"), detail: message) }
                         else { self.detail = message }
                     }
@@ -253,23 +275,40 @@ final class AppController: NSObject, NSApplicationDelegate, NSMenuDelegate {
                         }
                     }
                     try await next.start(testPattern: testing)
+                    if !lostDevice, !testing, config.sourceUUID == nil, !requestedTouchPermission {
+                        requestedTouchPermission = true
+                        if !CGPreflightPostEventAccess() { _ = CGRequestPostEventAccess() }
+                    }
+                    if lostDevice {
+                        sender = nil
+                        await next.stop()
+                        report(tr("USB tablet disconnected. Sharing stopped."))
+                    }
                 } catch {
                     if let failed = sender { sender = nil; await failed.stop() }
-                    report(tr("Connection failed"), detail: error.localizedDescription)
+                    sessionRequested = false
+                    sessionDevice = nil
+                    if lostDevice { report(tr("USB tablet disconnected. Sharing stopped.")) }
+                    else { report(tr("Connection failed"), detail: error.localizedDescription) }
                 }
+            } else if lostDevice || start {
+                report(tr("USB tablet disconnected. Sharing stopped."))
             } else { report(tr("Stopped")) }
+            if !sessionRequested { sessionDevice = nil }
             busy = false
         }
     }
 
     private func fail(_ message: String) async {
+        sessionRequested = false
+        sessionDevice = nil
         busy = true
         if let current = sender {
             current.onStatus = nil; current.onFailure = nil
             sender = nil
             await current.stop()
         }
-        report(tr("Connection stopped"), detail: message)
+        report(message == tr("USB tablet disconnected. Sharing stopped.") ? message : tr("Connection stopped"), detail: message)
         busy = false
     }
 

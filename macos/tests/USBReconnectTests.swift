@@ -1,7 +1,7 @@
 import Foundation
 
 @main struct USBReconnectTests {
-    static func main() {
+    static func main() async {
         let usb = "test-device device usb:0-1 product:test transport_id:7"
         precondition(USBDevice.parse("network:5555 device transport_id:8\nunauthorized unauthorized usb:0-2").isEmpty)
         var devices = usb
@@ -76,6 +76,26 @@ import Foundation
         expectedTransport = "25"
         targeted.poll()
         precondition(calls.count == 3)
+        var missing = false
+        mapping = ""
+        calls = []
+        let pinned = USBReconnect(run: { args in
+            calls.append(args)
+            if args == ["devices", "-l"] { return .init(status: 0, output: devices) }
+            if args.contains("--list") { return .init(status: 0, output: mapping) }
+            if args.contains("--no-rebind") { mapping = "UsbFfs tcp:27183 tcp:27184" }
+            if args.contains("--remove") { mapping = "" }
+            return .init(status: 0, output: "")
+        }, targetID: tabletB.identity, hostPort: 27184, requiredTransport: "25",
+           log: { _ in }, onMissing: { missing = true })
+        pinned.poll()
+        precondition(calls.count == 4)
+        devices = devices.replacingOccurrences(of: "transport_id:25", with: "transport_id:26")
+        pinned.poll()
+        precondition(missing && calls.count == 5)
+        await pinned.stop()
+        precondition(mapping.isEmpty && calls.last == ["-t", "25", "reverse", "--remove", "tcp:27183"])
+
         print("USB-only selection, reconnect, idempotence, conflicts and app-launch retry passed")
         print("多设备指定目标、独立转发端口、拔线不切换其他设备及新 transport 恢复通过")
     }

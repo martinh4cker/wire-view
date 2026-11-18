@@ -105,6 +105,18 @@ import AppKit
                 controller.devicesChanged([tabletA, tabletB])
                 print("设备菜单、首台迁移、A/B 配置切换恢复、离线保留目标通过")
 
+                if !video {
+                    // Losing and regaining USB during startup requires a fresh Start action.
+                    select([tr("More"), tr("Test pattern")])
+                    controller.devicesChanged([tabletB])
+                    controller.devicesChanged([tabletA, tabletB])
+                    try? await Task.sleep(nanoseconds: 100_000_000)
+                    precondition(menu().items[0].title == tr("USB tablet disconnected. Sharing stopped."))
+                    precondition(menu().item(withTitle: tr("Start display"))!.isEnabled)
+                    controller.devicesChanged([])
+                    precondition(!menu().item(withTitle: tr("Start display"))!.isEnabled)
+                }
+
                 if CommandLine.arguments.contains("--video") {
                     let waitFor: (String) async -> Void = { title in
                         for _ in 0..<40 {
@@ -123,12 +135,14 @@ import AppKit
                     select([tr("Size"), "1600 × 1000"])
                     await waitFor(tr("Testing"))
                     select([tr("Android devices"), tabletB.name])
-                    await waitFor(tr("Waiting for tablet"))
+                    await waitFor(tr("USB tablet disconnected. Sharing stopped."))
+                    precondition(!menu().item(withTitle: tr("Start display"))!.isEnabled)
                     check(tr("Quality"), tr("Clear"))
                     check(tr("Frame rate"), tr("%d fps", arguments: [30]))
                     try? await Task.sleep(nanoseconds: 1_000_000_000)
-                    precondition(menu().items[0].title == tr("Waiting for tablet")) // A cannot connect to B's endpoint.
+                    precondition(menu().item(withTitle: tr("Stop display")) == nil)
                     select([tr("Android devices"), tabletA.name])
+                    select([tr("More"), tr("Test pattern")])
                     await waitFor(tr("Testing"))
                     check(tr("Size"), "1600 × 1000")
                     check(tr("Frame rate"), tr("%d fps", arguments: [60]))

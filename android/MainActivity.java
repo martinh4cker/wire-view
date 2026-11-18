@@ -1,6 +1,7 @@
 package dev.wireview.receiver;
 
 import android.app.Activity;
+import android.content.Intent;
 import android.graphics.Color;
 import android.graphics.SurfaceTexture;
 import android.media.MediaCodec;
@@ -50,6 +51,8 @@ public final class MainActivity extends Activity implements VideoSurfaceView.Lis
     private volatile CadenceStats composed;
     private TextView status;
     private Receiver receiver;
+    private final TouchControl touch = new TouchControl();
+    private String inputToken;
     private int videoWidth, videoHeight;
 
     // Measure each stage independently; decoder callbacks alone do not prove display cadence.
@@ -114,16 +117,23 @@ public final class MainActivity extends Activity implements VideoSurfaceView.Lis
 
     @Override public void onCreate(Bundle saved) {
         super.onCreate(saved);
-        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         root = new FrameLayout(this);
         root.setBackgroundColor(Color.BLACK);
+        inputToken = getIntent().getStringExtra("wireview_input_token");
         view = new VideoSurfaceView(this, this);
+        view.setOnTouchListener((video, event) -> touch.handle(video, event,
+            receiver == null ? null : receiver.touchLink));
+        view.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> {
+            if (l != ol || t != ot || r != or || b != ob) touch.cancel();
+        });
         root.addView(view, new FrameLayout.LayoutParams(-1, -1, Gravity.CENTER));
         status = new TextView(this);
         status.setTextColor(Color.WHITE);
         status.setTextSize(22);
         status.setGravity(Gravity.CENTER);
-        status.setText(WireViewStrings.waitingForMac());
+        status.setText(WireViewStrings.waitingForConnection());
+        // The GL surface retains its last buffer. Cover it while disconnected.
+        status.setBackgroundColor(Color.BLACK);
         root.addView(status, new FrameLayout.LayoutParams(-1, -1));
         root.addOnLayoutChangeListener((v, l, t, r, b, ol, ot, or, ob) -> fitVideo());
         setContentView(root);
@@ -154,6 +164,17 @@ public final class MainActivity extends Activity implements VideoSurfaceView.Lis
         }
     }
 
+    @Override protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        String token = intent.getStringExtra("wireview_input_token");
+        if (!java.util.Objects.equals(token, inputToken)) {
+            stopReceiver();
+            inputToken = token;
+            startReceiver();
+        }
+    }
+
     @Override public void onResume() {
         super.onResume();
         resumed = true;
@@ -173,11 +194,23 @@ public final class MainActivity extends Activity implements VideoSurfaceView.Lis
     private void startReceiver() {
         if (!resumed || receiver != null || decoderTexture == null) return;
         composed = new CadenceStats("GPU-latched");
-        receiver = new Receiver(new Surface(decoderTexture));
+        receiver = new Receiver(new Surface(decoderTexture), inputToken);
         new Thread(receiver, "usb-video-receiver").start();
     }
 
+    private void setVideoVisible(boolean visible) {
+        root.setKeepScreenOn(visible);
+        if (visible) {
+            status.setVisibility(View.GONE);
+        } else if (status.getVisibility() == View.GONE) {
+            status.setText(WireViewStrings.disconnected());
+            status.setVisibility(View.VISIBLE);
+        }
+    }
+
     private void stopReceiver() {
+        setVideoVisible(false);
+        touch.cancel();
         if (receiver != null) receiver.stop();
         receiver = null;
         composed = null;
@@ -202,28 +235,23 @@ public final class MainActivity extends Activity implements VideoSurfaceView.Lis
 
     @Override public void onVideoRenderError() {
         stopReceiver();
-        status.setText(WireViewStrings.renderFailed());
-        status.setVisibility(View.VISIBLE);
     }
 
     private final class Receiver implements Runnable {
         final Surface surface;
         volatile boolean stopped;
         volatile Socket socket;
-        Receiver(Surface surface) { this.surface = surface; }
+        final String token;
+        volatile TouchControl.Feedback touchLink;
+        Receiver(Surface surface, String token) {
+            this.surface = surface;
+            this.token = token;
+        }
 
         void stop() {
             stopped = true;
             Socket current = socket;
             if (current != null) try { current.close(); } catch (IOException ignored) {}
-        }
-
-        void report(String message) {
-            runOnUiThread(() -> {
-                if (receiver != this) return;
-                status.setText(message);
-                status.setVisibility(message.isEmpty() ? TextView.GONE : TextView.VISIBLE);
-            });
         }
 
         @Override public void run() {
@@ -244,7 +272,6 @@ public final class MainActivity extends Activity implements VideoSurfaceView.Lis
                 } catch (Exception e) {
                     if (!stopped) {
                         if (!(e instanceof java.net.ConnectException)) Log.i(TAG, "Stream ended", e);
-                        report(WireViewStrings.waitingForMac());
                     }
                 } finally {
                     socket = null;
@@ -265,7 +292,8 @@ public final class MainActivity extends Activity implements VideoSurfaceView.Lis
             boolean quickAck = true;
             try { Os.setsockoptInt(fd, OsConstants.IPPROTO_TCP, TCP_QUICKACK, 1); }
             catch (ErrnoException e) { quickAck = false; Log.i(TAG, "TCP quick ACK unavailable"); }
-            if (input.readInt() != MAGIC) throw new IOException("Invalid stream header");
+            int magic = input.readInt();
+            if (magic != MAGIC && magic != MAGIC + 1) throw new IOException("Invalid stream header");
             int width = input.readInt(), height = input.readInt(), rate = input.readInt();
             if (width < 16 || width > 4096 || height < 16 || height > 4096 || rate < 1 || rate > 120)
                 throw new IOException("Invalid video mode");
@@ -287,6 +315,11 @@ public final class MainActivity extends Activity implements VideoSurfaceView.Lis
             FrameTimings timings = new FrameTimings();
             HandlerThread renderEvents = new HandlerThread("render-events");
             Thread output = null;
+            // WTS2 with a session token opts into input, while older receivers can still display video.
+            boolean hasTouchToken = token != null && token.matches("[0-9a-f]{28}");
+            Log.i(TAG, "Touch feedback configured: " + hasTouchToken);
+            TouchControl.Feedback feedback = magic == MAGIC + 1 || hasTouchToken
+                ? new TouchControl.Feedback(acknowledgements, connection, token) : null;
             try {
                 MediaCodecInfo info = codec.getCodecInfo();
                 MediaCodecInfo.CodecCapabilities capabilities = info.getCapabilitiesForType(MediaFormat.MIMETYPE_VIDEO_AVC);
@@ -306,7 +339,10 @@ public final class MainActivity extends Activity implements VideoSurfaceView.Lis
                     int count = ++rendered[0];
                     if (count == 1) {
                         lastReport[0] = time;
-                        report("");
+                        if (hasTouchToken && playing.get()) touchLink = feedback;
+                        runOnUiThread(() -> {
+                            if (receiver == this && resumed && playing.get()) setVideoVisible(true);
+                        });
                         Log.i(TAG, "Rendered first frame");
                     } else if ((count - 1) % 120 == 0) {
                         double measured = 120e9 / (time - lastReport[0]);
@@ -314,8 +350,11 @@ public final class MainActivity extends Activity implements VideoSurfaceView.Lis
                         Log.i(TAG, String.format(Locale.ROOT, "Codec callbacks %d frames, %.1f fps", count, measured));
                     }
                     if (count % 10 == 0) {
-                        try { acknowledgements.writeLong(pts); }
-                        catch (IOException e) { close(connection); }
+                        if (feedback != null) feedback.send(pts);
+                        else {
+                            try { acknowledgements.writeLong(pts); }
+                            catch (IOException e) { close(connection); }
+                        }
                     }
                     FrameTiming timing = timings.rendered(pts);
                     if (timing != null && timing.output >= timing.received) {
@@ -371,6 +410,11 @@ public final class MainActivity extends Activity implements VideoSurfaceView.Lis
                 }
             } finally {
                 playing.set(false);
+                touchLink = null;
+                runOnUiThread(() -> {
+                    if (receiver == this) setVideoVisible(false);
+                });
+                if (feedback != null) feedback.close();
                 if (output != null) output.join();
                 renderEvents.quitSafely();
                 codec.release();

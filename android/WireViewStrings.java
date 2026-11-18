@@ -7,12 +7,11 @@ final class WireViewStrings {
 
     private WireViewStrings() {}
 
-    static String waitingForMac() {
-        return CHINESE ? "等待 Mac 有线连接…" : "Waiting for a wired connection to Mac…";
+    static String waitingForConnection() {
+        return CHINESE ? "等待连接…" : "Waiting for connection…";
     }
 
-    static String renderFailed() {
-        return CHINESE ? "GPU 视频渲染失败，请重新打开接收端。"
-            : "GPU video rendering failed. Reopen the receiver app.";
+    static String disconnected() {
+        return CHINESE ? "已断开连接" : "Disconnected";
     }
 }

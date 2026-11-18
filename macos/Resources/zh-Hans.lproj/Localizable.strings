@@ -69,3 +69,8 @@
 "Could not apply the display position." = "无法应用副屏位置。";
 "macOS did not preserve the primary display, arrangement, or tablet position." = "macOS 没有保留主屏、现有排列或副屏位置。";
 "macOS did not place the tablet at the rightmost edge." = "macOS 没有把副屏放到最右端。";
+
+"Connect the selected USB tablet to start." = "请连接所选 USB 平板后再开始。";
+"USB tablet disconnected. Sharing stopped." = "USB 平板已断开，共享已停止。";
+"The tablet did not establish a video connection in time." = "平板未能在规定时间内建立视频连接。";
+"Allow WireView in Privacy & Security → Accessibility to use touch." = "请在「隐私与安全性 → 辅助功能」允许 WireView，即可使用触摸。";

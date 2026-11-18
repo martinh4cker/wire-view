@@ -54,6 +54,7 @@ final class USBDeviceMonitor {
     private let queue = DispatchQueue(label: "dev.wireview.device-list")
     private var timer: DispatchSourceTimer?
     private var previous: [USBDevice]?
+    private var failedPolls = 0
 
     init(run: @escaping USBReconnect.Run, changed: @escaping ([USBDevice]) -> Void) {
         self.run = run
@@ -67,6 +68,8 @@ final class USBDeviceMonitor {
         timer.setEventHandler { [weak self] in
             guard let self else { return }
             let result = self.run(["devices", "-l"])
+            self.failedPolls = result.status == 0 ? 0 : self.failedPolls + 1
+            guard result.status == 0 || self.failedPolls >= 3 else { return }
             let devices = result.status == 0 ? USBDevice.parse(result.output) : []
             guard devices != self.previous else { return }
             self.previous = devices
@@ -79,10 +82,15 @@ final class USBDeviceMonitor {
     deinit { timer?.cancel() }
 }
 
-final class USBReconnect {
+// Mutable session state is confined to the USB queue. Tests drive poll serially.
+final class USBReconnect: @unchecked Sendable {
     typealias Run = ([String]) -> ADBResult
     private let run: Run
     private let log: (String) -> Void
+    private let inputToken: String?
+    private let requiredTransport: String?
+    private var ownedTransport: String?
+    private let onMissing: () -> Void
     private let queue = DispatchQueue(label: "dev.wireview.usb")
     private var timer: DispatchSourceTimer?
     private var selectedSerial: String?
@@ -92,36 +100,64 @@ final class USBReconnect {
     private var lastMessage: String?
     private let port = "tcp:27183"
 
-    init(run: @escaping Run, targetID: String? = nil, hostPort: UInt16 = 27183,
-         log: @escaping (String) -> Void = { print($0) }) {
+    init(run: @escaping Run, targetID: String? = nil, hostPort: UInt16 = 27183, inputToken: String? = nil, requiredTransport: String? = nil,
+         log: @escaping (String) -> Void = { print($0) }, onMissing: @escaping () -> Void = {}) {
         self.run = run
         self.log = log
+        self.onMissing = onMissing
+        self.inputToken = inputToken
+        self.requiredTransport = requiredTransport
         self.targetID = targetID
         self.hostPort = "tcp:\(hostPort)"
     }
 
-    static func installed(targetID: String? = nil, hostPort: UInt16 = 27183,
-                          log: @escaping (String) -> Void = { print($0) }) -> USBReconnect? {
+    static func installed(targetID: String? = nil, hostPort: UInt16 = 27183, inputToken: String? = nil, requiredTransport: String? = nil,
+                          log: @escaping (String) -> Void = { print($0) }, onMissing: @escaping () -> Void = {}) -> USBReconnect? {
         guard let run = ADBClient.installed() else {
             log(tr("ADB was not found; install Android Platform-Tools to restore USB connection."))
             return nil
         }
-        return USBReconnect(run: run, targetID: targetID, hostPort: hostPort, log: log)
+        return USBReconnect(run: run, targetID: targetID, hostPort: hostPort, inputToken: inputToken, requiredTransport: requiredTransport, log: log, onMissing: onMissing)
     }
 
     func start() {
-        guard timer == nil else { return }
-        let timer = DispatchSource.makeTimerSource(queue: queue)
-        timer.schedule(deadline: .now(), repeating: .seconds(1))
-        timer.setEventHandler { [weak self] in self?.poll() }
-        self.timer = timer
-        timer.resume()
+        queue.async {
+            guard self.timer == nil else { return }
+            let timer = DispatchSource.makeTimerSource(queue: self.queue)
+            timer.schedule(deadline: .now(), repeating: .seconds(1))
+            timer.setEventHandler { [weak self] in self?.poll() }
+            self.timer = timer
+            timer.resume()
+        }
     }
 
     deinit { timer?.cancel() }
 
-    func stop() {
-        queue.sync { timer?.cancel(); timer = nil }
+    func stop() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            queue.async {
+                self.timer?.cancel()
+                self.timer = nil
+                self.removeOwnedMapping()
+                continuation.resume()
+            }
+        }
+    }
+
+    private func removeOwnedMapping() {
+        guard let transport = ownedTransport else { return }
+        ownedTransport = nil
+        let target = ["-t", transport]
+        let listing = run(target + ["reverse", "--list"])
+        if listing.status == 0, let mapped = mappedHost(in: listing.output), mapped == hostPort {
+            _ = run(target + ["reverse", "--remove", port])
+        }
+    }
+
+    private func mappedHost(in output: String) -> Substring? {
+        output.split(separator: "\n")
+            .map { $0.split(whereSeparator: { $0.isWhitespace }) }
+            .first { $0.count == 3 && $0[1] == port }?[2]
     }
 
     // Run serially on the USB queue; tests can drive one poll at a time.
@@ -131,7 +167,8 @@ final class USBReconnect {
         let devices = USBDevice.parse(listing.output)
         let device: USBDevice
         if let targetID {
-            guard let selected = devices.first(where: { $0.identity == targetID }) else {
+            guard let selected = devices.first(where: { $0.identity == targetID && (requiredTransport == nil || $0.transport == requiredTransport) }) else {
+                onMissing()
                 startedTransport = nil
                 report(tr("Selected USB tablet disconnected; reconnect it to resume."))
                 return
@@ -139,6 +176,7 @@ final class USBReconnect {
             device = selected
         } else if let selectedSerial {
             guard let selected = devices.first(where: { $0.serial == selectedSerial }) else {
+                onMissing()
                 startedTransport = nil
                 report(tr("USB tablet disconnected; reconnect it to resume."))
                 return
@@ -155,18 +193,19 @@ final class USBReconnect {
         let target = ["-t", device.transport]
         let mappings = run(target + ["reverse", "--list"])
         guard mappings.status == 0 else { report(tr("USB connection is not ready; retrying.")); return }
-        let existing = mappings.output.split(separator: "\n").map { $0.split(whereSeparator: { $0.isWhitespace }).map(String.init) }
-            .first { $0.count == 3 && $0[1] == port }
-        if let existing {
-            guard existing[2] == hostPort else { report(tr("Tablet port is in use; the existing forwarding was left unchanged.")); return }
+        if let existing = mappedHost(in: mappings.output) {
+            guard existing == hostPort else { report(tr("Tablet port is in use; the existing forwarding was left unchanged.")); return }
         } else {
             guard run(target + ["reverse", "--no-rebind", port, hostPort]).status == 0 else {
                 report(tr("USB forwarding failed; retrying."))
                 return
             }
+            ownedTransport = device.transport
         }
         if startedTransport != device.transport {
-            let launched = run(target + ["shell", "am", "start", "-n", "dev.wireview.receiver/.MainActivity"])
+            var args = target + ["shell", "am", "start", "-n", "dev.wireview.receiver/.MainActivity"]
+            if let inputToken { args += ["--es", "wireview_input_token", inputToken] }
+            let launched = run(args)
             guard launched.status == 0, !launched.output.contains("Error") else {
                 report(tr("Install the receiver app on the tablet; connection will retry automatically."))
                 return

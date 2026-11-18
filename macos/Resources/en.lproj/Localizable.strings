@@ -69,3 +69,8 @@
 "Could not apply the display position." = "Could not apply the display position.";
 "macOS did not preserve the primary display, arrangement, or tablet position." = "macOS did not preserve the primary display, arrangement, or tablet position.";
 "macOS did not place the tablet at the rightmost edge." = "macOS did not place the tablet at the rightmost edge.";
+
+"Connect the selected USB tablet to start." = "Connect the selected USB tablet to start.";
+"USB tablet disconnected. Sharing stopped." = "USB tablet disconnected. Sharing stopped.";
+"The tablet did not establish a video connection in time." = "The tablet did not establish a video connection in time.";
+"Allow WireView in Privacy & Security → Accessibility to use touch." = "Allow WireView in Privacy & Security → Accessibility to use touch.";

@@ -16,7 +16,7 @@ Turn an Android tablet into a wired secondary display for your Mac. WireView foc
 - Creates an independent macOS extended desktop while preserving the primary display and existing monitor layout; can also mirror a connected Mac display.
 - Streams H.264 over USB using USB debugging and `adb reverse`; no Wi-Fi or external server is used.
 - Selects the Android device, size, bitrate, and frame-rate target from the macOS menu bar. Settings and display placement are saved per device.
-- Reconnects after USB unplug/replug. The Mac menu and Android receiver support Simplified Chinese and English, following each device's system language.
+- In the current source, unplugging USB stops sharing and removes the virtual display. Reconnect the tablet and select **Start display** to use its saved settings and placement. The Mac menu and Android receiver support Simplified Chinese and English, following each device's system language.
 
 ## Download: 0.1.0
 
@@ -40,6 +40,12 @@ This is a development preview. The Mac app is ad-hoc signed and not notarized. T
    ```
 
 3. Connect the tablet by USB, enable USB debugging, and authorize this Mac. Open WireView on Android, then click the Mac menu-bar icon → **Start display**. macOS will ask for screen-recording permission the first time.
+
+### Touch control (current source)
+
+Build and update both apps from the same source. Touch is enabled by default in **Extended desktop** once WireView has permission in **Privacy & Security → Accessibility**. Tap to click, hold and move to drag, or swipe with two fingers to scroll.
+
+Swipe left or right with three fingers to change Spaces. A left swipe advances to the Space on the right. Swipe up with three fingers for Mission Control or down for the current app’s windows. Swipe left with four fingers to switch to the next app and right to switch in reverse. These gestures use macOS default shortcuts. Space switching requires a neighboring Space and the corresponding shortcuts enabled in System Settings.
 
 ## Build from source
 
@@ -76,7 +82,7 @@ A generated test pattern reached about 60 fps at 1280×800 / 4 Mbps on one Andro
 
 - The macOS virtual display uses the private `CGVirtualDisplay` interface and may need updates after macOS changes.
 - Testing so far covers Apple silicon Mac and one Android 13 tablet; compatibility with other devices is not yet established.
-- Touch input, audio, simultaneous streaming to multiple tablets, and a Windows host are not implemented.
+- Native multi-touch, audio, simultaneous streaming to multiple tablets, and a Windows host are not implemented.
 - Stable real-world 90/120 fps presentation has not been verified.
 
 ## Development and contributions

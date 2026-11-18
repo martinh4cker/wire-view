@@ -4,9 +4,11 @@ import CoreMedia
 import CoreVideo
 import ColorSync
 import Network
+import OSLog
 import ScreenCaptureKit
 import VideoToolbox
 
+let touchLog = Logger(subsystem: "dev.wireview.host", category: "touch")
 private let queue = DispatchQueue(label: "dev.wireview.video")
 private func nowMicros() -> UInt64 { DispatchTime.now().uptimeNanoseconds / 1_000 }
 
@@ -28,6 +30,10 @@ final class Sender: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Senda
     private let settings: StreamSettings
     private let targetDeviceID: String?
     private let hostPort: UInt16
+    private let usbTransport: String?
+    private var connectionDeadline: UInt64?
+    private var connectionFailed = false
+    private var clientReadyAt: UInt64?
     private let preferences: UserDefaults
     private var width: Int { settings.size.width }
     private var height: Int { settings.size.height }
@@ -55,13 +61,18 @@ final class Sender: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Senda
     private var display: CGVirtualDisplay?
     private var layoutMemory: TabletLayoutMemory?
     private var stream: SCStream?
+    private var touchInput: TouchInput?
+    private let inputToken = UUID().uuidString.replacingOccurrences(of: "-", with: "").lowercased().prefix(28)
+    private var hasFirstTokenHalf = false
+    private var inputAuthorized = false
     private var usbReconnect: USBReconnect?
 
     init(settings: StreamSettings, targetDeviceID: String? = nil, hostPort: UInt16 = 27183,
-         preferences: UserDefaults = .standard) throws {
+         preferences: UserDefaults = .standard, usbTransport: String? = nil) throws {
         self.settings = settings
         self.targetDeviceID = targetDeviceID
         self.hostPort = hostPort
+        self.usbTransport = usbTransport
         self.preferences = preferences
         let tcp = NWProtocolTCP.Options()
         tcp.noDelay = true
@@ -139,6 +150,7 @@ final class Sender: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Senda
             try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
             try await stream.startCapture()
             self.stream = stream
+            if settings.sourceUUID == nil { touchInput = TouchInput(display: captureID) }
             print("已开始采集虚拟显示器 \(target.displayID)")
         }
 
@@ -174,12 +186,31 @@ final class Sender: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Senda
             }
         }
         listener.newConnectionHandler = { [weak self] in self?.accept($0) }
+        connectionDeadline = nowMicros() + 12_000_000
         listener.start(queue: queue)
-        usbReconnect = USBReconnect.installed(targetID: targetDeviceID, hostPort: hostPort, log: { [weak self] in self?.report($0) })
+        usbReconnect = USBReconnect.installed(targetID: targetDeviceID, hostPort: hostPort,
+                                              inputToken: touchInput == nil ? nil : String(inputToken),
+                                              requiredTransport: usbTransport,
+                                              log: { [weak self] message in self?.report(message) },
+                                              onMissing: { [weak self] in
+            queue.async { [weak self] in
+                guard let self, !self.stopping else { return }
+                if let client = self.connection { self.disconnect(client) }
+                if self.usbTransport != nil { self.failConnection(tr("USB tablet disconnected. Sharing stopped.")) }
+            }
+        })
         usbReconnect?.start()
         let timer = DispatchSource.makeTimerSource(queue: queue)
         timer.schedule(deadline: .now(), repeating: testPattern ? .nanoseconds(1_000_000_000 / fps) : .milliseconds(300))
         timer.setEventHandler { [weak self] in
+            if let self, let deadline = self.connectionDeadline {
+                let now = nowMicros()
+                if let ready = self.clientReadyAt, now - ready >= 1_000_000 {
+                    self.connectionDeadline = nil
+                } else if now >= deadline {
+                    self.failConnection(tr("The tablet did not establish a video connection in time."))
+                }
+            }
             if let self, let last = self.lastAckAt, nowMicros() - last > 2_000_000 {
                 self.lastAckAt = nil
                 self.ackWindowStart = nil
@@ -205,8 +236,7 @@ final class Sender: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Senda
                 self.clientReady = false
                 self.timer?.cancel()
                 self.timer = nil
-                self.usbReconnect?.stop()
-                self.usbReconnect = nil
+                self.touchInput?.release()
                 self.listener.cancel()
                 self.connection?.cancel()
                 self.connection = nil
@@ -220,12 +250,18 @@ final class Sender: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Senda
         stream = nil
         layoutMemory = nil
         display = nil
+        if let usbReconnect { await usbReconnect.stop() }
+        usbReconnect = nil
     }
 
     private func accept(_ client: NWConnection) {
-        guard !stopping else { client.cancel(); return }
+        guard !stopping, !connectionFailed else { client.cancel(); return }
+        touchInput?.release()
         connection?.cancel()
         connection = client
+        hasFirstTokenHalf = false
+        inputAuthorized = false
+        clientReadyAt = nil
         clientReady = false
         needsKeyFrame = true
         sending = false
@@ -246,6 +282,7 @@ final class Sender: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Senda
                 header.push(UInt32(height))
                 header.push(UInt32(fps))
                 self.clientReady = true
+                self.clientReadyAt = nowMicros()
                 self.write(header, to: client)
                 self.readRenderAck(client)
                 self.report("\(tr("Connected")) · \(self.settings.summary)")
@@ -263,6 +300,11 @@ final class Sender: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Senda
             if finished || error != nil { self.disconnect(client); return }
             if let data, data.count == 8 {
                 let pts = data.reduce(UInt64(0)) { ($0 << 8) | UInt64($1) }
+                if pts >> 63 != 0 {
+                    self.readInputWord(pts)
+                    self.readRenderAck(client)
+                    return
+                }
                 let now = nowMicros()
                 self.lastAckAt = now
                 if let start = self.ackWindowStart {
@@ -295,10 +337,40 @@ final class Sender: NSObject, SCStreamOutput, SCStreamDelegate, @unchecked Senda
         }
     }
 
+    private func readInputWord(_ word: UInt64) {
+        guard let touchInput else { return }
+        let payload = word & 0x00ff_ffff_ffff_ffff
+        switch (word >> 56) & 0x7f {
+        case 6:
+            hasFirstTokenHalf = UInt64(inputToken.prefix(14), radix: 16) == payload
+            inputAuthorized = false
+            touchInput.release()
+        case 7:
+            inputAuthorized = hasFirstTokenHalf && UInt64(inputToken.suffix(14), radix: 16) == payload
+            hasFirstTokenHalf = false
+            touchLog.notice("Input session authentication accepted: \(self.inputAuthorized, privacy: .public)")
+            if !inputAuthorized { touchInput.release() }
+        default:
+            if inputAuthorized { touchInput.handle(word) }
+        }
+    }
+
+    private func failConnection(_ message: String) {
+        guard !connectionFailed else { return }
+        connectionFailed = true
+        if let client = connection { disconnect(client) }
+        connectionDeadline = nil
+        touchInput?.release()
+        DispatchQueue.main.async { [weak self] in self?.onFailure?(message) }
+    }
+
     private func disconnect(_ client: NWConnection) {
         guard connection === client else { return }
+        touchInput?.release()
         connection = nil
+        clientReadyAt = nil
         clientReady = false
+        if !stopping, connectionDeadline == nil { connectionDeadline = nowMicros() + 5_000_000 }
         client.cancel()
         report(tr("Waiting for tablet"))
         DispatchQueue.main.async { [weak self] in self?.onMetrics?(.init(acknowledgedFPS: nil, latencyMedian: nil, latencyP95: nil)) }
